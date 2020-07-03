@@ -1,0 +1,18 @@
+{
+    "certificate": {
+        "subject": {
+            "CN": "AWS IoT Certificate",
+            "O": "Amazon.com Inc. L",
+            "OU": "Amazon Web Services",
+            "L": "Seattle",
+            "ST": "Washington",
+            "C": "US"
+        },
+        "validity": 20
+    },
+    "iot": {
+        "certValidity": 15,
+        "thingPrefix": "provisioning",
+        "thingGroup": "provisioningGroup"
+    }
+}

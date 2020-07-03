@@ -1,0 +1,530 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  aws-iot-device-provisioning
+
+  Sample SAM Template for aws-iot-device-provisioning
+
+Globals:
+  Function:
+    Runtime: python3.7
+    AutoPublishAlias: live
+    DeploymentPreference:
+      Type: AllAtOnce
+
+Outputs:
+  StackArn:
+    Description: Use this as the stack_arn in your cloud_formation_deployment_stack override.
+    Value: {Ref: 'AWS::StackId'}
+  ApiGateWayInvokeUrl:
+    Description: "API Gateway Invoke URL"
+    Value: !Sub "https://${IoTProvisioningApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+  UserPool:
+    Description: "App Auth User Pool"
+    Value: !GetAtt IoTProvisioningUserPool.Arn
+  UserPoolId:
+    Description: "App Auth User Pool ID"
+    Value: !Ref IoTProvisioningUserPool
+  AppClient:
+    Description: "IoT Provisioning App Client"
+    Value: !Ref IoTProvisioningAppClient
+  DynamoDBTable:
+    Description: "IoT Devices table"
+    Value: !Ref IoTDevicesTable
+
+Parameters:
+  AdministratorName:
+    Type: String
+    Description: Name of the IoT Provisioning App administrator.
+  AdministratorEmail:
+    Type: String
+    Description: Email address for IoT Provisioning App administrator.
+    AllowedPattern: "^[_A-Za-z0-9-\\+]+(\\.[_A-Za-z0-9-]+)*@[A-Za-z0-9-]+(\\.[A-Za-z0-9]+)*(\\.[A-Za-z]{2,})$"
+  Stage: {Type: String, Default: 'Beta'}
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Administator Configuration"
+        Parameters:
+          - AdministratorName
+          - AdministratorEmail
+    ParameterLabels:
+      AdministratorName:
+        default: "Administrator name"
+      AdministratorEmail:
+        default: "Administrator email address"
+
+Mappings:
+  Cognito:
+    App:
+      FullName: 'IoT Provisioning App'
+
+Resources:
+  # Permissions & Policies [start]
+  IoTProvisioningLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: 'sts:AssumeRole'
+          Principal:
+            Service: lambda.amazonaws.com
+      Policies:
+      - PolicyName: IoTProvisioningLambdaPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: 'logs:CreateLogGroup'
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+            - Effect: Allow
+              Action:
+                - acm-pca:IssueCertificate
+                - acm-pca:GetCertificateAuthorityCertificate
+                - acm-pca:GetCertificate
+              Resource: !Ref IoTCA
+            - Effect: Allow
+              Action:
+                - iot:DetachThingPrincipal
+                - iot:CreateThing
+                - iot:AttachThingPrincipal
+                - iot:DetachPolicy
+                - iot:AttachPolicy
+                - iot:DeletePolicyVersion
+                - iot:AddThingToThingGroup
+                - iot:RegisterCertificate
+                - iot:CreatePolicy
+                - iot:ListAttachedPolicies
+                - iot:CreateThingGroup
+                - iot:DeletePolicy
+                - iot:ListPolicyVersions
+                - iot:ListThingPrincipals
+                - iot:UpdateCertificate
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - 'dynamodb:List*'
+                - 'dynamodb:DescribeReservedCapacity*'
+                - 'dynamodb:DescribeLimits'
+                - 'dynamodb:DescribeTimeToLive'
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:DescribeTable
+                - dynamodb:GetItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+              Resource:
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${IoTDevicesTable}'
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${IoTDevicesTable}/index/*'
+  IoTProvisioningHelperExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: 'sts:AssumeRole'
+          Principal:
+            Service: lambda.amazonaws.com
+      Policies:
+      - PolicyName: IoTProvisioningHelperPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - acm-pca:IssueCertificate
+                - acm-pca:GetCertificateAuthorityCertificate
+                - acm-pca:GetCertificate
+              Resource: !Ref IoTCA
+            - Effect: Allow
+              Action: iot:UpdateCACertificate
+              Resource: !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:cacert/*'
+            - Effect: Allow
+              Action:
+                - iot:GetRegistrationCode
+                - iot:RegisterCACertificate
+                - iot:TagResource
+                - iot:ListCACertificates
+                - iot:ListTagsForResource
+                - iot:DeleteCACertificate
+              Resource: '*'
+  CloudWatchRole:
+    Type: "AWS::IAM::Role"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "permission neeeded for Api Gateway to put access logs on CW"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      Policies:
+        - PolicyName: "IoTProvisioningApiAccessLogPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:DescribeLogGroups"
+                  - "logs:DescribeLogStreams"
+                  - "logs:PutLogEvents"
+                  - "logs:GetLogEvents"
+                  - "logs:FilterLogEvents"
+                Resource: "*"
+  # Permissions & Policies [end]
+  # Lambda [start]
+  IoTProvisioningLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: 'provisioning_lambda/'
+      Handler: lambda_function.provisioning_handler
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          CA_ARN: !Ref IoTCA
+          DDB_TABLE:
+            Ref: IoTDevicesTable
+      Role: !GetAtt IoTProvisioningLambdaExecutionRole.Arn
+  IoTProvisioningLambdaPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: IoTProvisioningLambdaFunction
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${IoTProvisioningApi}/*/*/*
+      Principal: apigateway.amazonaws.com
+  IoTProvisioningHelper:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: 'deployment_lambda/'
+      Handler: lambda_function.cf_handler
+      Description: "IoT Provisioning deployment helper"
+      Timeout: 120
+      MemorySize: 128
+      Environment:
+        Variables:
+          CA_ARN: !Ref IoTCA
+      Role: !GetAtt IoTProvisioningHelperExecutionRole.Arn
+  # Lambda [end]
+  # API Gateway [start]
+  IoTProvisioningApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: 'IoTProvisioning'
+      Description: 'IoT Provisioning API'
+  IoTProvisioningApiAuth:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: IoTProvisioningAuthorizer
+      Type: COGNITO_USER_POOLS
+      RestApiId: !Ref IoTProvisioningApi
+      IdentitySource: 'method.request.header.Authorization'
+      ProviderARNs:
+        - !GetAtt
+          - IoTProvisioningUserPool
+          - Arn
+  CertificateResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref IoTProvisioningApi
+      ParentId: !GetAtt
+        - IoTProvisioningApi
+        - RootResourceId
+      PathPart: 'certificate'
+  CreateCertificateMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref IoTProvisioningApi
+      ResourceId: !Ref CertificateResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref IoTProvisioningApiAuth
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${IoTProvisioningLambdaFunction.Arn}/invocations"
+        IntegrationHttpMethod: POST
+      RequestValidatorId: !Ref CreateCertificateRequestValidator
+      RequestModels:
+        'application/json': !Ref CertificateRequest
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            'application/json': !Ref CertificateResponse
+  CreateCertificateRequestValidator:
+    Type: AWS::ApiGateway::RequestValidator
+    Properties:
+      Name: "CreateCertificateRequestValidator"
+      RestApiId: !Ref IoTProvisioningApi
+      ValidateRequestBody: True
+      ValidateRequestParameters: False
+  ApiAccountLogging:
+    Type: "AWS::ApiGateway::Account"
+    Properties:
+      CloudWatchRoleArn: !GetAtt
+        - CloudWatchRole
+        - Arn
+  CertificateRequest:
+    Type: 'AWS::ApiGateway::Model'
+    Properties:
+      Name: 'CertificateRequest'
+      RestApiId: !Ref IoTProvisioningApi
+      ContentType: application/json
+      Schema:
+        $schema: 'http://json-schema.org/draft-04/schema#'
+        title: 'CertificateRequest'
+        type: 'object'
+        required:
+          - DSN
+        properties:
+          DSN:
+            type: string
+  CertificateResponse:
+    Type: 'AWS::ApiGateway::Model'
+    Properties:
+      Name: 'CertificateResponse'
+      RestApiId: !Ref IoTProvisioningApi
+      ContentType: application/json
+      Schema:
+        $schema: 'http://json-schema.org/draft-04/schema#'
+        title: 'CertificateResponse'
+        type: 'object'
+        properties:
+          certificatePem:
+            type: string
+          privateKey:
+            type: string
+  IoTProvisioningApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ApiAccountLogging
+      - CreateCertificateMethod
+    Properties:
+      RestApiId: !Ref IoTProvisioningApi
+      Description: "For testing"
+      StageName: !Ref Stage
+      StageDescription:
+        AccessLogSetting:
+          DestinationArn: !Sub ${IoTProvisioningAPILogs.Arn}
+          Format: '{ "requestId": "$context.requestId","ip": "$context.identity.sourceIp","caller": "$context.identity.caller","user": "$context.identity.user","userAgent": "$context.identity.userAgent","requestTime": "$context.requestTime","httpMethod": "$context.httpMethod","resourcePath": "$context.resourcePath","status": "$context.status","protocol": "$context.protocol","responseLength": "$context.responseLength"}'
+  # API Gateway [end]
+  # Cognito [start]
+  IoTProvisioningUserPool:
+    Type: "AWS::Cognito::UserPool"
+    Properties:
+      UserPoolName: "IoTProvisioningUser"
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: True
+        InviteMessageTemplate:
+          EmailMessage: '<p>You are invited to join the IoT Provisioning App. Your temporary password is as follows:</p>
+                        <p>
+                          Password: <strong>{####}</strong><br />
+                          id: {username}
+                        </p><p>'
+          EmailSubject:
+            !Join [
+              " ",
+              [
+                "Your",
+                !FindInMap ["Cognito", "App", "FullName"],
+                "login.",
+              ]
+            ]
+          SMSMessage: "Your username is {username} and temporary password is {####}."
+        UnusedAccountValidityDays: 7
+      AliasAttributes:
+        - 'email'
+      EmailVerificationMessage:
+        !Join [
+          " ",
+          [
+            "Your",
+            !FindInMap ["Cognito", "App", "FullName"],
+            "verification code is {####}.",
+          ],
+        ]
+      EmailVerificationSubject:
+        !Join [
+          " ",
+          [
+            "Your",
+            !FindInMap ["Cognito", "App", "FullName"],
+            "verification code",
+          ],
+        ]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: True
+          RequireNumbers: True
+          RequireSymbols: True
+          RequireUppercase: True
+      Schema:
+        - AttributeDataType: "String"
+          Name: "email"
+          Required: True
+  IoTProvisioningAppClient:
+    Type: "AWS::Cognito::UserPoolClient"
+    Properties:
+      ClientName: "IoTProvisioningAndroidApp"
+      GenerateSecret: True
+      WriteAttributes:
+        - "address"
+        - "email"
+        - "phone_number"
+      ReadAttributes:
+        - "name"
+        - "family_name"
+        - "given_name"
+        - "middle_name"
+        - "nickname"
+        - "preferred_username"
+        - "updated_at"
+        - "email"
+        - "email_verified"
+        - "address"
+        - "phone_number"
+        - "phone_number_verified"
+      RefreshTokenValidity: 1
+      UserPoolId: !Ref IoTProvisioningUserPool
+  IoTProvisioningAdminCognitoGroup:
+    Type: "AWS::Cognito::UserPoolGroup"
+    Properties:
+      Description: "Administrator group for managing IoT Provisioning User"
+      GroupName: "Administrators"
+      UserPoolId: !Ref IoTProvisioningUserPool
+  IoTProvisioningMemberCognitoGroup:
+    Type: "AWS::Cognito::UserPoolGroup"
+    Properties:
+      Description: "Member group for access to the IoT Provisioning App"
+      GroupName: "Members"
+      UserPoolId: !Ref IoTProvisioningUserPool
+  IoTProvisioningAdminCognitoUser:
+    Type: AWS::Cognito::UserPoolUser
+    Properties:
+      DesiredDeliveryMediums:
+        - EMAIL
+      ForceAliasCreation: True
+      UserAttributes:
+        - Name: email
+          Value: !Ref AdministratorEmail
+        - Name: nickname
+          Value: !Ref AdministratorName
+        - Name: email_verified
+          Value: True
+      Username:
+        !Join [
+          "_",
+          !Split [
+            ".",
+            !Join ["_", !Split ["@", !Ref AdministratorEmail]],
+          ],
+        ]
+      UserPoolId: !Ref IoTProvisioningUserPool
+  IoTProvisioningAdminGroupAssignment:
+    Type: "AWS::Cognito::UserPoolUserToGroupAttachment"
+    Properties:
+      GroupName: !Ref IoTProvisioningAdminCognitoGroup
+      Username: !Ref IoTProvisioningAdminCognitoUser
+      UserPoolId: !Ref IoTProvisioningUserPool
+  # Cognito [end]
+  # Log [start]
+  IoTProvisioningLambdaLogs:
+    DependsOn: IoTProvisioningLambdaFunction
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${IoTProvisioningLambdaFunction}
+  IoTProvisioningAPILogs:
+    DependsOn: IoTProvisioningApi
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/api/IoTProvisioningAccessLogs/${Stage}"
+  # Log [end]
+  # DynamoDB [start]
+  IoTDevicesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "IoTDevices"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "dsn"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "dsn"
+          KeyType: "HASH"
+  # DynamoDB [end]
+  # ACMPCA [start]
+  IoTCA:
+    Type: AWS::ACMPCA::CertificateAuthority
+    Properties:
+      Type: ROOT
+      KeyAlgorithm: RSA_2048
+      SigningAlgorithm: SHA256WITHRSA
+      Subject:
+        Country: US
+        Organization: 'Amazon.com Inc. L'
+        OrganizationalUnit: 'Amazon Web Services'
+        State: 'Washington'
+        Locality: 'Seattle'
+        CommonName: 'AWS IoT Certificate'
+      RevocationConfiguration:
+        CrlConfiguration:
+          Enabled: false
+  IoTCACertificate:
+    Type: AWS::ACMPCA::Certificate
+    Properties:
+      CertificateAuthorityArn: !Ref IoTCA
+      CertificateSigningRequest: !GetAtt
+        - IoTCA
+        - CertificateSigningRequest
+      SigningAlgorithm: SHA256WITHRSA
+      TemplateArn: 'arn:aws:acm-pca:::template/RootCACertificate/V1'
+      Validity:
+        TYPE: YEARS
+        Value: 20
+  IoTCAActivation:
+    Type: AWS::ACMPCA::CertificateAuthorityActivation
+    Properties:
+      CertificateAuthorityArn: !Ref IoTCA
+      Certificate: !GetAtt
+        - IoTCACertificate
+        - Certificate
+      Status: ACTIVE
+  # ACMPCA [end]
+  # Custom resources [start]
+  IoTCARegistration:
+    Type: "Custom::RegisterCA"
+    Properties:
+      ServiceToken:
+        Fn::GetAtt:
+          - IoTProvisioningHelper
+          - Arn
+      Region:
+        - Ref: "AWS::Region"
+      CAArn: !Ref IoTCA
+  # Custom resources [end]
