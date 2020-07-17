@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import os
@@ -6,6 +7,10 @@ from http import HTTPStatus
 
 import boto3
 from botocore.exceptions import ClientError
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
 from OpenSSL.crypto import TYPE_RSA, PKey, X509Req, dump_certificate_request, dump_privatekey
 from OpenSSL.SSL import FILETYPE_PEM
 
@@ -34,8 +39,9 @@ class ConfigError(Exception):
         self.message = message
 
 
-def check_event_env(event):
+def get_request_body(event):
     body = json.loads(event.get('body', '{}'))
+    # check DSN
     if not body.get('DSN'):
         raise InvalidRequestException('Missing required field: DSN')
     elif len(body['DSN']) > 115:
@@ -44,6 +50,20 @@ def check_event_env(event):
         pattern = re.compile('[^\\w\\-]')
         if pattern.match(body['DSN']):
             raise InvalidRequestException('DSN Must contain only alphanumeric characters and/or the following: -_')
+    # check public key
+    if not body.get('publicKey'):
+        raise InvalidRequestException('Missing required field: publicKey')
+    else:
+        try:
+            body['publicKey'] = X25519PublicKey.from_public_bytes(
+                base64.b64decode(body['publicKey'])
+            )
+        except Exception:
+            raise InvalidRequestException('Invalid public key')
+    return body
+
+
+def check_env():
     if not os.environ.get('CA_ARN'):
         raise EnvironmentException('Missing CA_ARN')
     if not os.environ.get('DDB_TABLE'):
@@ -123,8 +143,10 @@ def provisioning_handler(event, context):
     resp = {'statusCode': HTTPStatus.OK.value, 'body': {}}
 
     try:
-        check_event_env(event)
-        dsn = json.loads(event['body'])['DSN']
+        check_env()
+        body = get_request_body(event)
+        dsn = body['DSN']
+        public_key = body['publicKey']
         ca_arn = os.environ['CA_ARN']
         config = get_config()
 
@@ -134,7 +156,29 @@ def provisioning_handler(event, context):
         ca_cert_pem = acmpca.get_ca_certificate(ca_arn)
         thing_info = Iot().register_iot_thing(dsn, cert_pem, ca_cert_pem, config['iot'])
         record_device_info(dsn, cert_arn, thing_info)
-        resp['body'] = {'certificatePem': cert_pem, 'privateKey': privatekey}
+
+        # generate X25519 key pair
+        local_private_key = X25519PrivateKey.generate()
+        local_public_key = local_private_key.public_key()
+        local_public_key_str = base64.b64encode(
+            local_public_key.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw
+            )
+        ).decode('ascii')
+
+        # generate shared key
+        secret = local_private_key.exchange(public_key)
+
+        # encrypt private key
+        fernet = Fernet(base64.b64encode(secret))
+        encrypted_private_key = fernet.encrypt(privatekey.encode('utf-8')).decode('utf-8')
+
+        resp['body'] = {
+            'certificatePem': cert_pem,
+            'encryptedPrivateKey': encrypted_private_key,
+            'publicKey': local_public_key_str
+        }
     except InvalidRequestException as ire:
         logger.warning('Invalid request: %s', json.dumps(event))
         resp.update({'statusCode': HTTPStatus.BAD_REQUEST.value, 'body': {'msg': str(ire)}})

@@ -13,9 +13,9 @@ This project provides a solution that you can deploy into your AWS account, to s
 
 ## Architecture
 
-![Architecuture](docs/architecture.png)
+![Architecture](docs/architecture.png)
 
-1. User install an app on the mobile phone.  This app is owned by either the manufacturer, or the operator of the IoT device.
+1. User installs an app on the mobile phone.  This app is owned by either the manufacturer, or the operator of the IoT device.
 2. User logins in with [Amazon Cognito](https://aws.amazon.com/cognito/), and acquires a token.
 3. APP sends a http request through [Amazon API Gateway](https://aws.amazon.com/api-gateway/) appended with the device ID (e.g. a serial number) to Amazon API gateway.  The device’s ID can be scan from bar code, or keyed in by user.
 4. Amazon API Gateway triggers an [AWS Lambda](https://aws.amazon.com/lambda/) function to validate the API request payload.
@@ -33,13 +33,13 @@ This flow chart shows the way to register your CA to AWS IoT Core. After the CA 
 
 ![API](docs/api_flow.png)
 
-This flow char shows the provisioning flow between target device, provisioning app and the API. The project contains source code and supporting files for a serverless application shown in the architecture diagram.  You can deploy it into your AWS account by using the SAM CLI. It includes the following files and folders.
+This flow chart shows the provisioning flow between target device, provisioning app and the API. The project contains source code and supporting files for a serverless application shown in the architecture diagram.  You can deploy it into your AWS account by using the SAM CLI. It includes the following files and folders.
 
 * provisioning_lambda - Code for the provisioning API.
 * deployment_lambda - Code for custom resource in CloudFormation template.
 * template.yaml - A template that defines the application's AWS resources.
 
-The application uses several AWS resources, including AWS Certificate Manager, Amazon DynamoDB, AWS IoT Core, Amazon Cognito, Lambda functions and an API Gateway API. These resources are defined in the `template.yaml` file in this project. You can update the template to add AWS resources through the same deployment process that updates your application code. The subjects of CA is defined at line 488. You can change the contents for your needs.
+The application uses several AWS resources, including AWS Certificate Manager, Amazon DynamoDB, AWS IoT Core, Amazon Cognito, Lambda functions and an API from API Gateway. These resources are defined in the `template.yaml` file in this project. You can update the template to add AWS resources through the same deployment process that updates your application code. The subjects of CA is defined at line 488. You can change the contents for your needs.
 
 If you prefer to use an integrated development environment (IDE) to build and test your application, you can use the AWS Toolkit.  
 
@@ -51,9 +51,10 @@ The AWS Toolkit is an open source plug-in for popular IDEs that uses the SAM CLI
 * [VS Code](https://docs.aws.amazon.com/toolkit-for-vscode/latest/userguide/welcome.html)
 * [Visual Studio](https://docs.aws.amazon.com/toolkit-for-visual-studio/latest/user-guide/welcome.html)
 
-This project **does not **contains a sample mobile app.  Here are some tips for you to create one. The app should have a way to communicate with the target device. We assume you can use BLE to connect it. The device need to check it has a valid certificate and private key or not. If it does not have them, it will do BLE advertising and wait for the provisioning app connect to it. Once the device get the certificate/private key from app, it needs to store these file in a secure storage. For example, if the target device is an Android device, it can store the certificate/private key in Android keystore system.
+This project **does not **contain a sample mobile app.  Here are some tips for you to create one. The app should have a way to communicate with the target device. We assume you can use BLE to connect it. The device need to check if it has a valid certificate and private key or not. If it does not have them, it will do BLE advertising and wait for the provisioning app connect to it. Once the device gets the certificate/private key from app, it needs to store these file in a secure storage. For example, if the target device is an Android device, it can store the certificate/private key in Android keystore system.
 
 The [AWS BLE demo](https://docs.aws.amazon.com/freertos/latest/userguide/ble-demo.html) links to mobile SDKs that you can take advantage of for developing the mobile app.
+
 
 ## API
 
@@ -63,24 +64,28 @@ The [AWS BLE demo](https://docs.aws.amazon.com/freertos/latest/userguide/ble-dem
 HTTP POST https://{endpoint}/certificate
 Content-Type: application/json
 BODY: {
-    "DSN": "string"
+    "DSN": String,
+    "publicKey": String
 }
 ```
 
 DSN: The device serial number (required)
+publicKey: The base64-encoded X25519 public key from device (required). Device should generate a X25519 key pair and keep the private key by itself.
 
 **Response**
 
 ```
 HTTP 200
 BODY: {
-    "certificatePem": "string",
-    "privateKey": "string"
+    "certificatePem": String,
+    "encryptedPrivateKey": String,
+    "publicKey": String
 }
 ```
 
 certificatePem: X.509 certificate
-privateKey: related private key
+encryptedPrivateKey: X.509 private key which is encrypted by secret key. The secret key can be generated by device's private key and the public key from response payload.
+publicKey: The base64-encoded X25519 public key from remote server for secret key generation.
 
 ## Customize config
 
@@ -106,8 +111,6 @@ You can modify the config from `provisioning_lambda/config.json`
     }
 }
 ```
-
-
 
 ## Deploy the sample application
 
@@ -157,6 +160,28 @@ curl -k -d '{"DSN": <Device Serial Number>}' -H "Content-Type: application/json"
 -H "Authorization: <Cognito Auth Token>" -X POST \
 https://<api ID>.execute-api.<region>.amazonaws.com/Beta/certificate
 ```
+
+This project also contains a example with two python scripts. You can test the provisioning flow by running `device.py` and `provisioning_app.py`.
+
+The dependencies of the scripts are defined in `example/requirements.txt`. You can install the dependencies by following command.
+
+```shell
+pip3 install -r example/requirements.txt
+```
+
+Then execute device script.
+
+```shell
+python3 device.py
+```
+
+Execute provisioning_app.py
+
+```
+python3 provisioning_app.py
+```
+
+You can get the result from your terminal for better understanding of the provisioning flow.
 
 
 

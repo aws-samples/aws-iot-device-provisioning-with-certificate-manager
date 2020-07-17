@@ -46,7 +46,7 @@ Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
-          default: "Administator Configuration"
+          default: "Administrator Configuration"
         Parameters:
           - AdministratorName
           - AdministratorEmail
@@ -300,8 +300,11 @@ Resources:
         type: 'object'
         required:
           - DSN
+          - publicKey
         properties:
           DSN:
+            type: string
+          publicKey:
             type: string
   CertificateResponse:
     Type: 'AWS::ApiGateway::Model'
@@ -316,7 +319,9 @@ Resources:
         properties:
           certificatePem:
             type: string
-          privateKey:
+          encryptedPrivateKey:
+            type: string
+          publicKey:
             type: string
   IoTProvisioningApiDeployment:
     Type: AWS::ApiGateway::Deployment
